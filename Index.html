@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kamera QR - Santri Menabung</title>
+  <meta name="theme-color" content="#0E6B4F">
+  <style>
+    :root { font-family: Arial, sans-serif; color: #1e293b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f1f5f9; padding: 16px; }
+    .card { max-width: 520px; margin: 0 auto; background: white; border-radius: 18px; padding: 20px; box-shadow: 0 8px 30px #0f172a18; }
+    h1 { margin: 0 0 8px; font-size: 21px; color: #0E6B4F; }
+    p { font-size: 14px; line-height: 1.5; }
+    #reader { width: 100%; overflow: hidden; border-radius: 12px; background: #0f172a; min-height: 220px; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+    button, .upload { display: inline-flex; justify-content: center; align-items: center; min-height: 44px; border: 0; border-radius: 10px; padding: 10px 12px; font-weight: 700; cursor: pointer; font-size: 14px; text-align: center; }
+    button { background: #0E6B4F; color: white; }
+    button.secondary { background: #e2e8f0; color: #334155; }
+    .upload { background: #2563eb; color: white; }
+    #file { display: none; }
+    #status { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; overflow-wrap: anywhere; }
+    .small { color: #64748b; font-size: 12px; }
+    @media (max-width: 380px) { .actions { grid-template-columns: 1fr; } }
+  </style>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+  <main class="card">
+    <h1>Scanner QR Santri</h1>
+    <p>Arahkan kamera ke QR Code pada kartu tabungan. Setelah QR terbaca, hasilnya akan dikirim kembali ke aplikasi Santri Menabung.</p>
+    <div id="reader"></div>
+    <div class="actions">
+      <button id="startBtn" type="button">Buka Kamera</button>
+      <button id="stopBtn" class="secondary" type="button">Stop Kamera</button>
+      <label class="upload" for="file">Ambil Foto / Pilih Gambar QR</label>
+      <input id="file" type="file" accept="image/*" capture="environment">
+    </div>
+    <p id="status" role="status">Siap. Tekan “Buka Kamera” dan izinkan akses kamera.</p>
+    <p class="small">Pastikan halaman dibuka melalui HTTPS dan izin kamera browser diatur ke Izinkan. Jika kamera tidak tersedia, gunakan opsi foto/gambar QR.</p>
+  </main>
+<script>
+(function () {
+  'use strict';
+  const params = new URLSearchParams(location.search);
+  const nonce = params.get('nonce') || '';
+  const statusEl = document.getElementById('status');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const fileInput = document.getElementById('file');
+  let scanner = null;
+  let busy = false;
+
+  function status(message) { statusEl.textContent = message; }
+
+  async function stopScanner() {
+    const current = scanner;
+    scanner = null;
+    if (!current) return;
+    try { if (current.isScanning) await current.stop(); } catch (e) { console.warn(e); }
+    try { await current.clear(); } catch (e) { console.warn(e); }
+  }
+
+  function sendResult(value) {
+    if (busy) return;
+    busy = true;
+    const result = String(value || '').trim();
+    if (!result) { busy = false; return; }
+    status('QR terbaca. Mengirim hasil ke aplikasi…');
+    stopScanner().finally(function () {
+      if (nonce && window.opener && !window.opener.closed) {
+        window.opener.postMessage({
+          type: 'SANTRI_MENABUNG_QR_RESULT',
+          nonce: nonce,
+          value: result
+        }, '*');
+        status('Hasil berhasil dikirim. Jendela kamera akan ditutup.');
+        setTimeout(function () { window.close(); }, 700);
+      } else {
+        status('Hasil QR: ' + result + '. Halaman dibuka langsung, jadi hasil tidak dikirim ke aplikasi. Untuk transaksi, buka pemindai dari aplikasi SANTRI MENABUNG.');
+        busy = false;
+      }
+    });
+  }
+
+  async function startScanner() {
+    if (scanner || busy) return;
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      status('Kamera memerlukan HTTPS dan browser yang mendukung akses kamera. Gunakan opsi foto/gambar QR.');
+      return;
+    }
+    if (typeof Html5Qrcode === 'undefined') {
+      status('Library pemindai gagal dimuat. Periksa koneksi internet atau gunakan foto/gambar QR.');
+      return;
+    }
+
+    try {
+      status('Meminta izin kamera…');
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } } });
+      stream.getTracks().forEach(function (track) { track.stop(); });
+
+      scanner = new Html5Qrcode('reader');
+      const cameras = await Html5Qrcode.getCameras();
+      let camera = { facingMode: 'environment' };
+      if (cameras && cameras.length) {
+        const back = cameras.find(function (c) { return /back|rear|environment|belakang|main/i.test(c.label); });
+        camera = back ? back.id : cameras[cameras.length - 1].id;
+      }
+      await scanner.start(camera, { fps: 10, qrbox: function (w, h) {
+        const side = Math.max(150, Math.min(260, Math.floor(Math.min(w, h) * 0.75)));
+        return { width: side, height: side };
+      } }, sendResult, function () {});
+      status('Kamera aktif. Arahkan QR ke dalam bingkai pemindai.');
+    } catch (error) {
+      await stopScanner();
+      let message = 'Gagal membuka kamera.';
+      if (error && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')) {
+        message = 'Izin kamera ditolak. Izinkan kamera melalui setelan browser lalu coba lagi.';
+      } else if (error && error.name === 'NotFoundError') {
+        message = 'Kamera tidak ditemukan pada perangkat ini.';
+      } else if (error && (error.name === 'NotReadableError' || error.name === 'TrackStartError')) {
+        message = 'Kamera sedang digunakan aplikasi lain. Tutup aplikasi lain yang memakai kamera.';
+      } else if (error && error.message) {
+        message += ' ' + error.message;
+      }
+      status(message + ' Anda juga dapat memilih gambar QR.');
+      console.error(error);
+    }
+  }
+
+  startBtn.addEventListener('click', startScanner);
+  stopBtn.addEventListener('click', function () {
+    stopScanner().then(function () { status('Kamera dihentikan.'); });
+  });
+  fileInput.addEventListener('change', async function () {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    if (typeof Html5Qrcode === 'undefined') { status('Library pemindai gagal dimuat.'); return; }
+    try {
+      await stopScanner();
+      status('Membaca gambar QR…');
+      const imageScanner = new Html5Qrcode('reader');
+      const decoded = await imageScanner.scanFile(file, true);
+      try { await imageScanner.clear(); } catch (_) {}
+      sendResult(decoded);
+    } catch (error) {
+      status('QR tidak terdeteksi. Pastikan gambar jelas, terang, dan QR tidak terpotong.');
+      console.warn(error);
+    } finally {
+      fileInput.value = '';
+    }
+  });
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.opener || !event.data || event.data.type !== 'SANTRI_MENABUNG_CAMERA_STOP') return;
+    if (event.data.nonce !== nonce) return;
+    stopScanner().finally(function () { status('Kamera dihentikan oleh aplikasi.'); });
+  });
+  window.addEventListener('pagehide', function () { stopScanner(); });
+})();
+</script>
+</body>
+</html>
